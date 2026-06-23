@@ -1,0 +1,1013 @@
+"""
+RAE - Registro de Asistencia Estudiantil
+Sistema completo con Tkinter + SQLite
+"""
+
+import tkinter as tk
+from tkinter import ttk, messagebox
+import sqlite3
+from datetime import datetime, date
+
+# ─────────────────────────────────────────
+#  COLORES Y FUENTES (tema visual)
+# ─────────────────────────────────────────
+BG_MAIN    = "#f0f2f5"
+BG_HEADER  = "#d9dde3"
+BG_WHITE   = "#ffffff"
+BG_CARD    = "#ffffff"
+COLOR_BLUE = "#1a73e8"
+COLOR_RED  = "#e53935"
+COLOR_GREEN= "#43a047"
+COLOR_GRAY = "#5f6368"
+COLOR_LIGHT= "#e8eaf6"
+
+FONT_TITLE  = ("Segoe UI", 18, "bold")
+FONT_HEADER = ("Segoe UI", 11, "bold")
+FONT_NORMAL = ("Segoe UI", 10)
+FONT_SMALL  = ("Segoe UI", 9)
+FONT_BTN    = ("Segoe UI", 10, "bold")
+
+# ─────────────────────────────────────────
+#  BASE DE DATOS (SQLite)
+# ─────────────────────────────────────────
+DB_FILE = "rae.db"
+
+def get_connection():
+    """Devuelve una conexión abierta a la base de datos."""
+    return sqlite3.connect(DB_FILE)
+
+def init_db():
+    """Crea las tablas si no existen e inserta datos de prueba."""
+    conn = get_connection()
+    c = conn.cursor()
+
+    # Tabla de estudiantes
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS estudiantes (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre   TEXT NOT NULL,
+            apellido TEXT NOT NULL,
+            grado    TEXT NOT NULL
+        )
+    """)
+
+    # Tabla de registros de asistencia
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS registros (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            estudiante_id   INTEGER NOT NULL,
+            tipo            TEXT NOT NULL,          -- 'Ingreso' o 'Salida'
+            fecha           TEXT NOT NULL,
+            hora            TEXT NOT NULL,
+            observaciones   TEXT,
+            registrado_por  TEXT DEFAULT 'Sistema',
+            FOREIGN KEY (estudiante_id) REFERENCES estudiantes(id)
+        )
+    """)
+
+    # Tabla de usuarios del sistema (portería / administrador)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS usuarios (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            usuario  TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL,
+            rol      TEXT NOT NULL   -- 'porteria' o 'admin'
+        )
+    """)
+
+    # Datos de ejemplo
+    c.execute("SELECT COUNT(*) FROM estudiantes")
+    if c.fetchone()[0] == 0:
+        estudiantes = [
+            ("Juan",   "Pérez",     "5to"),
+            ("María",  "García",    "6to"),
+            ("Carlos", "Rodríguez", "5to"),
+        ]
+        c.executemany(
+            "INSERT INTO estudiantes (nombre, apellido, grado) VALUES (?,?,?)",
+            estudiantes
+        )
+
+    c.execute("SELECT COUNT(*) FROM usuarios")
+    if c.fetchone()[0] == 0:
+        usuarios = [
+            ("porteria", "1234", "porteria"),
+            ("admin",    "admin", "admin"),
+        ]
+        c.executemany(
+            "INSERT INTO usuarios (usuario, password, rol) VALUES (?,?,?)",
+            usuarios
+        )
+
+    conn.commit()
+    conn.close()
+
+
+# ─────────────────────────────────────────
+#  UTILIDADES DE UI
+# ─────────────────────────────────────────
+def make_btn(parent, text, command, color=COLOR_BLUE, fg="white", width=18):
+    """Crea un botón estilizado."""
+    btn = tk.Button(
+        parent, text=text, command=command,
+        bg=color, fg=fg, font=FONT_BTN,
+        relief="flat", cursor="hand2",
+        padx=10, pady=6, width=width
+    )
+    btn.bind("<Enter>", lambda e: btn.config(bg=_darken(color)))
+    btn.bind("<Leave>", lambda e: btn.config(bg=color))
+    return btn
+
+def _darken(hex_color):
+    """Oscurece ligeramente un color hex."""
+    mapping = {
+        COLOR_BLUE:  "#1558b0",
+        COLOR_RED:   "#b71c1c",
+        COLOR_GREEN: "#2e7d32",
+        COLOR_GRAY:  "#424242",
+    }
+    return mapping.get(hex_color, hex_color)
+
+def make_header(parent, title):
+    """Barra de encabezado con título."""
+    hdr = tk.Frame(parent, bg=BG_HEADER, height=50)
+    hdr.pack(fill="x")
+    tk.Label(hdr, text=title, bg=BG_HEADER,
+             font=("Segoe UI", 13, "bold"), padx=14).pack(side="left", pady=10)
+    return hdr
+
+def make_navbar(parent, items):
+    """Barra de navegación con botones de texto."""
+    nav = tk.Frame(parent, bg=BG_HEADER, height=34)
+    nav.pack(fill="x")
+    for label, cmd in items:
+        tk.Button(
+            nav, text=label, command=cmd,
+            bg=BG_HEADER, fg="#333", font=FONT_NORMAL,
+            relief="flat", cursor="hand2", padx=12, pady=5
+        ).pack(side="left")
+    return nav
+
+
+# ─────────────────────────────────────────
+#  VENTANA BASE
+# ─────────────────────────────────────────
+class BaseWindow(tk.Toplevel):
+    """Ventana base con fondo y estructura común."""
+    def __init__(self, master, title="RAE", size="900x620"):
+        super().__init__(master)
+        self.title(title)
+        self.geometry(size)
+        self.configure(bg=BG_MAIN)
+        self.resizable(True, True)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  PANTALLA 1 – INICIO / REGISTRO INGRESO-SALIDA
+# ═══════════════════════════════════════════════════════════════
+class PantallaInicio(tk.Frame):
+    """Pantalla principal: registro por número de identificación."""
+
+    def __init__(self, master):
+        super().__init__(master, bg=BG_MAIN)
+        self.pack(fill="both", expand=True)
+        self._build()
+
+    def _build(self):
+        # Header
+        hdr = tk.Frame(self, bg=BG_HEADER)
+        hdr.pack(fill="x")
+        tk.Label(
+            hdr, text='· "RAE" : REGISTRO DE ASISTENCIA ESTUDIANTIL.',
+            bg=BG_HEADER, font=("Segoe UI", 11, "bold"), padx=16
+        ).pack(side="left", pady=12)
+
+        # Título
+        tk.Label(self, text="Registro de Ingreso / Salida",
+                 bg=BG_MAIN, font=FONT_TITLE).pack(pady=(40, 20))
+
+        # Tarjeta central
+        card = tk.Frame(self, bg=BG_CARD, bd=1, relief="solid",
+                        padx=40, pady=30)
+        card.pack(ipadx=20)
+
+        tk.Label(card, text="Ingresar Datos Manualmente",
+                 bg=BG_CARD, font=FONT_HEADER).pack(pady=(0, 14))
+
+        self.entry_id = tk.Entry(card, font=FONT_NORMAL, width=32,
+                                 bd=1, relief="solid",
+                                 fg=COLOR_GRAY)
+        self.entry_id.insert(0, "Número de Identificación")
+        self.entry_id.bind("<FocusIn>",  self._clear_placeholder)
+        self.entry_id.bind("<FocusOut>", self._restore_placeholder)
+        self.entry_id.pack(pady=(0, 16), ipady=8)
+
+        make_btn(card, "Registrar", self._registrar, width=30).pack()
+
+        # Íconos de acceso rápido
+        icons_frame = tk.Frame(self, bg=BG_MAIN)
+        icons_frame.pack(pady=40)
+        self._make_icon(icons_frame, "✔", "Registro\nexitoso",
+                        COLOR_BLUE, self._ver_exitoso)
+        self._make_icon(icons_frame, "👤", "Acceso personal\nportería",
+                        COLOR_GREEN, self._login_porteria)
+        self._make_icon(icons_frame, "👥", "Acceso\nadministrador/director",
+                        "#7c4dff", self._login_admin)
+
+    def _make_icon(self, parent, symbol, label, color, command):
+        frame = tk.Frame(parent, bg=BG_MAIN)
+        frame.pack(side="left", padx=24)
+        btn = tk.Button(frame, text=symbol, font=("Segoe UI", 22),
+                        bg=color, fg="white", width=3, height=1,
+                        relief="flat", cursor="hand2", command=command)
+        btn.pack()
+        tk.Label(frame, text=label, bg=BG_MAIN,
+                 font=FONT_SMALL, fg=COLOR_GRAY, justify="center").pack(pady=4)
+
+    # ── Placeholder ──
+    def _clear_placeholder(self, e):
+        if self.entry_id.get() == "Número de Identificación":
+            self.entry_id.delete(0, "end")
+            self.entry_id.config(fg="black")
+
+    def _restore_placeholder(self, e):
+        if not self.entry_id.get():
+            self.entry_id.insert(0, "Número de Identificación")
+            self.entry_id.config(fg=COLOR_GRAY)
+
+    # ── Acción Registrar ──
+    def _registrar(self):
+        num_id = self.entry_id.get().strip()
+        if not num_id or num_id == "Número de Identificación":
+            messagebox.showwarning("Campo requerido",
+                                   "Ingrese un número de identificación.")
+            return
+
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute("SELECT id, nombre, apellido FROM estudiantes WHERE id=?",
+                  (num_id,))
+        row = c.fetchone()
+        conn.close()
+
+        if not row:
+            messagebox.showerror("No encontrado",
+                                 f"No se encontró el estudiante con ID {num_id}.")
+            return
+
+        est_id, nombre, apellido = row
+        now = datetime.now()
+        fecha = now.strftime("%Y-%m-%d")
+        hora  = now.strftime("%I:%M %p")
+
+        # Determinar tipo: si ya tiene ingreso hoy sin salida → Salida
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute("""
+            SELECT tipo FROM registros
+            WHERE estudiante_id=? AND fecha=?
+            ORDER BY id DESC LIMIT 1
+        """, (est_id, fecha))
+        ultimo = c.fetchone()
+        tipo = "Salida" if ultimo and ultimo[0] == "Ingreso" else "Ingreso"
+
+        c.execute("""
+            INSERT INTO registros (estudiante_id, tipo, fecha, hora, observaciones)
+            VALUES (?,?,?,?,?)
+        """, (est_id, tipo, fecha, hora, "Registrado automáticamente"))
+        conn.commit()
+        conn.close()
+
+        PantallaRegistroExitoso(self.winfo_toplevel(), nombre, apellido, tipo)
+
+    def _ver_exitoso(self):
+        PantallaRegistroExitoso(self.winfo_toplevel(), "Demo", "Usuario", "Ingreso")
+
+    def _login_porteria(self):
+        LoginWindow(self.winfo_toplevel(), "porteria")
+
+    def _login_admin(self):
+        LoginWindow(self.winfo_toplevel(), "admin")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  VENTANA LOGIN
+# ═══════════════════════════════════════════════════════════════
+class LoginWindow(BaseWindow):
+    def __init__(self, master, rol_esperado):
+        super().__init__(master, "Iniciar sesión", "380x280")
+        self.rol_esperado = rol_esperado
+        self._build()
+
+    def _build(self):
+        tk.Label(self, text="Iniciar Sesión", bg=BG_MAIN,
+                 font=FONT_TITLE).pack(pady=(30, 20))
+
+        card = tk.Frame(self, bg=BG_CARD, bd=1, relief="solid",
+                        padx=30, pady=20)
+        card.pack()
+
+        tk.Label(card, text="Usuario:", bg=BG_CARD, font=FONT_NORMAL).pack(anchor="w")
+        self.e_user = tk.Entry(card, font=FONT_NORMAL, width=28,
+                               bd=1, relief="solid")
+        self.e_user.pack(pady=(2, 10), ipady=5)
+
+        tk.Label(card, text="Contraseña:", bg=BG_CARD, font=FONT_NORMAL).pack(anchor="w")
+        self.e_pass = tk.Entry(card, font=FONT_NORMAL, width=28,
+                               show="*", bd=1, relief="solid")
+        self.e_pass.pack(pady=(2, 14), ipady=5)
+
+        make_btn(card, "Entrar", self._login, width=28).pack()
+
+    def _login(self):
+        usuario  = self.e_user.get().strip()
+        password = self.e_pass.get().strip()
+
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute("SELECT rol FROM usuarios WHERE usuario=? AND password=?",
+                  (usuario, password))
+        row = c.fetchone()
+        conn.close()
+
+        if not row:
+            messagebox.showerror("Error", "Usuario o contraseña incorrectos.")
+            return
+
+        rol = row[0]
+        if rol != self.rol_esperado:
+            messagebox.showerror("Error", f"No tiene permisos de '{self.rol_esperado}'.")
+            return
+
+        self.destroy()
+        if rol == "porteria":
+            open_new_window(self.master, PanelPorteria)
+        else:
+            open_new_window(self.master, PanelAdministracion)
+
+
+def open_new_window(master, cls):
+    """Abre una ventana secundaria de tipo cls."""
+    win = tk.Toplevel(master)
+    win.geometry("1000x660")
+    win.configure(bg=BG_MAIN)
+    win.title("RAE")
+    cls(win)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  PANTALLA 2 – REGISTRO EXITOSO
+# ═══════════════════════════════════════════════════════════════
+class PantallaRegistroExitoso(BaseWindow):
+    def __init__(self, master, nombre, apellido, tipo):
+        super().__init__(master, "Registro Exitoso", "540x380")
+        self._build(nombre, apellido, tipo)
+
+    def _build(self, nombre, apellido, tipo):
+        make_header(self, "RAE")
+
+        tk.Label(self, text="✔", font=("Segoe UI", 48),
+                 bg=BG_MAIN, fg=COLOR_GREEN).pack(pady=(40, 6))
+
+        tk.Label(self, text="¡Registro Exitoso!",
+                 bg=BG_MAIN, font=("Segoe UI", 16, "bold")).pack()
+
+        card = tk.Frame(self, bg=BG_CARD, bd=1, relief="solid",
+                        padx=30, pady=20)
+        card.pack(pady=20)
+
+        tk.Label(card,
+                 text=f"Tu {tipo.lower()} ha sido registrado correctamente.",
+                 bg=BG_CARD, font=FONT_NORMAL, fg=COLOR_GRAY).pack()
+        tk.Label(card,
+                 text=f"Estudiante: {nombre} {apellido}",
+                 bg=BG_CARD, font=FONT_HEADER).pack(pady=(8, 0))
+
+        make_btn(self, "Volver al Inicio", self.destroy, width=20).pack(pady=8)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  PANTALLA 3 – PANEL DE PORTERÍA
+# ═══════════════════════════════════════════════════════════════
+class PanelPorteria(tk.Frame):
+    def __init__(self, master):
+        super().__init__(master, bg=BG_MAIN)
+        self.pack(fill="both", expand=True)
+        self._build()
+
+    def _build(self):
+        make_header(self, "RAE")
+        make_navbar(self, [
+            ("Inicio",        lambda: None),
+            ("Monitoreo",     self._refresh),
+            ("Administración",lambda: None),
+        ])
+
+        tk.Label(self, text="Panel de Monitoreo (Personal de Portería)",
+                 bg=BG_MAIN, font=FONT_TITLE).pack(anchor="w", padx=20, pady=14)
+
+        card = tk.Frame(self, bg=BG_CARD, bd=1, relief="solid",
+                        padx=16, pady=16)
+        card.pack(fill="both", expand=True, padx=20, pady=(0, 20))
+
+        tk.Label(card, text="Registros en Tiempo Real",
+                 bg=BG_CARD, font=FONT_HEADER).pack(anchor="w", pady=(0, 10))
+
+        # Tabla
+        cols = ("Estudiante", "Tipo de Registro", "Hora", "Acciones")
+        self.tree = ttk.Treeview(card, columns=cols, show="headings", height=12)
+        for col in cols:
+            self.tree.heading(col, text=col)
+            self.tree.column(col, width=200 if col != "Acciones" else 120)
+        self.tree.pack(fill="both", expand=True)
+        self.tree.bind("<Double-1>", self._on_double_click)
+
+        make_btn(card, "🔄 Actualizar", self._refresh,
+                 color=COLOR_GRAY, width=16).pack(anchor="e", pady=6)
+
+        self._refresh()
+
+    def _refresh(self):
+        for row in self.tree.get_children():
+            self.tree.delete(row)
+
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute("""
+            SELECT r.id, e.nombre || ' ' || e.apellido, r.tipo, r.hora
+            FROM registros r
+            JOIN estudiantes e ON r.estudiante_id = e.id
+            ORDER BY r.id DESC LIMIT 20
+        """)
+        for reg_id, nombre, tipo, hora in c.fetchall():
+            self.tree.insert("", "end", iid=reg_id,
+                             values=(nombre, tipo, hora, "Doble clic → detalles"))
+        conn.close()
+
+    def _on_double_click(self, event):
+        sel = self.tree.selection()
+        if sel:
+            reg_id = int(sel[0])
+            DetallesRegistro(self.winfo_toplevel(), reg_id)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  PANTALLA 4 – DETALLES DE REGISTRO
+# ═══════════════════════════════════════════════════════════════
+class DetallesRegistro(BaseWindow):
+    def __init__(self, master, reg_id):
+        super().__init__(master, "Detalles de Registro", "700x420")
+        self._build(reg_id)
+
+    def _build(self, reg_id):
+        make_header(self, "RAE")
+
+        tk.Label(self, text="Detalles de Registro",
+                 bg=BG_MAIN, font=FONT_TITLE).pack(anchor="w", padx=20, pady=12)
+
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute("""
+            SELECT e.nombre || ' ' || e.apellido, e.id, r.tipo,
+                   r.fecha || ' ' || r.hora, r.observaciones, r.registrado_por
+            FROM registros r
+            JOIN estudiantes e ON r.estudiante_id = e.id
+            WHERE r.id = ?
+        """, (reg_id,))
+        row = c.fetchone()
+        conn.close()
+
+        if not row:
+            tk.Label(self, text="Registro no encontrado.",
+                     bg=BG_MAIN, font=FONT_NORMAL).pack(pady=40)
+            return
+
+        nombre, est_id, tipo, fecha_hora, obs, reg_por = row
+
+        card = tk.Frame(self, bg=BG_CARD, bd=1, relief="solid",
+                        padx=30, pady=24)
+        card.pack(fill="x", padx=20)
+
+        def field(parent, label, value, row, col):
+            tk.Label(parent, text=label + ":", bg=BG_CARD,
+                     font=FONT_HEADER).grid(row=row, column=col*2,
+                                            sticky="w", pady=4, padx=(0, 8))
+            tk.Label(parent, text=value, bg=BG_CARD,
+                     font=FONT_NORMAL, fg=COLOR_GRAY).grid(row=row+1, column=col*2,
+                                                           sticky="w")
+
+        field(card, "Estudiante",      nombre,    0, 0)
+        field(card, "ID Estudiante",   str(est_id), 0, 1)
+        field(card, "Tipo de Registro",tipo,       2, 0)
+        field(card, "Fecha y Hora",    fecha_hora,  2, 1)
+
+        tk.Label(card, text="Observaciones:", bg=BG_CARD,
+                 font=FONT_HEADER).grid(row=4, column=0, sticky="w", pady=(12, 0))
+        tk.Label(card, text=obs or "—", bg=BG_CARD,
+                 font=FONT_NORMAL, fg=COLOR_GRAY).grid(row=5, column=0, sticky="w")
+
+        tk.Label(card, text="Registrado por:", bg=BG_CARD,
+                 font=FONT_HEADER).grid(row=6, column=0, sticky="w", pady=(12, 0))
+        tk.Label(card, text=reg_por or "—", bg=BG_CARD,
+                 font=FONT_NORMAL, fg=COLOR_GRAY).grid(row=7, column=0, sticky="w")
+
+        make_btn(self, "Volver al Monitoreo", self.destroy, width=22).pack(
+            anchor="w", padx=20, pady=16)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  PANTALLA 5 – PANEL DE ADMINISTRACIÓN
+# ═══════════════════════════════════════════════════════════════
+class PanelAdministracion(tk.Frame):
+    def __init__(self, master):
+        super().__init__(master, bg=BG_MAIN)
+        self.pack(fill="both", expand=True)
+        self._build()
+
+    def _build(self):
+        make_header(self, "RAE")
+        make_navbar(self, [
+            ("Inicio",        lambda: None),
+            ("Monitoreo",     lambda: None),
+            ("Administración",lambda: None),
+        ])
+
+        tk.Label(self, text="Panel de Administración",
+                 bg=BG_MAIN, font=FONT_TITLE).pack(pady=(30, 20))
+
+        cards_frame = tk.Frame(self, bg=BG_MAIN)
+        cards_frame.pack()
+
+        opciones = [
+            ("👥", "Gestionar estudiantes",  self._gestionar_estudiantes),
+            ("🕐", "Consultar historial",    self._consultar_historial),
+            ("📄", "Generar reportes",       self._generar_reportes),
+        ]
+        for icon, label, cmd in opciones:
+            self._make_card(cards_frame, icon, label, cmd)
+
+    def _make_card(self, parent, icon, label, cmd):
+        frame = tk.Frame(parent, bg=BG_CARD, bd=1, relief="solid",
+                         padx=30, pady=30)
+        frame.pack(side="left", padx=16, ipadx=10)
+
+        tk.Label(frame, text=icon, font=("Segoe UI", 32),
+                 bg=BG_CARD, fg=COLOR_BLUE).pack(pady=(0, 8))
+        tk.Label(frame, text=label, bg=BG_CARD,
+                 font=FONT_HEADER).pack(pady=(0, 14))
+        make_btn(frame, "Ir", cmd, width=8).pack()
+
+    def _gestionar_estudiantes(self):
+        open_new_window(self.winfo_toplevel(), GestionEstudiantes)
+
+    def _consultar_historial(self):
+        open_new_window(self.winfo_toplevel(), ConsultaHistorial)
+
+    def _generar_reportes(self):
+        open_new_window(self.winfo_toplevel(), GeneracionReportes)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  PANTALLA 6 – GESTIÓN DE ESTUDIANTES
+# ═══════════════════════════════════════════════════════════════
+class GestionEstudiantes(tk.Frame):
+    def __init__(self, master):
+        super().__init__(master, bg=BG_MAIN)
+        self.pack(fill="both", expand=True)
+        self._build()
+
+    def _build(self):
+        make_header(self, "RAE")
+        make_navbar(self, [
+            ("Inicio",        lambda: None),
+            ("Monitoreo",     lambda: None),
+            ("Administración",lambda: None),
+        ])
+
+        top = tk.Frame(self, bg=BG_MAIN)
+        top.pack(fill="x", padx=20, pady=10)
+
+        tk.Label(top, text="Gestión de Estudiantes",
+                 bg=BG_MAIN, font=FONT_TITLE).pack(side="left")
+        make_btn(top, "Volver al panel", self.winfo_toplevel().destroy,
+                 width=16).pack(side="right")
+
+        btn_row = tk.Frame(self, bg=BG_MAIN)
+        btn_row.pack(anchor="w", padx=20, pady=(0, 10))
+        make_btn(btn_row, "Añadir Estudiante",   self._añadir,   width=18).pack(side="left", padx=4)
+        make_btn(btn_row, "Editar Estudiante",    self._editar,   color=COLOR_GRAY, width=18).pack(side="left", padx=4)
+        make_btn(btn_row, "Eliminar Estudiante",  self._eliminar, color=COLOR_RED,  width=18).pack(side="left", padx=4)
+
+        # Búsqueda
+        search_card = tk.Frame(self, bg=BG_CARD, bd=1, relief="solid",
+                               padx=14, pady=10)
+        search_card.pack(fill="x", padx=20, pady=(0, 10))
+        tk.Label(search_card, text="Buscar Estudiante", bg=BG_CARD,
+                 font=FONT_HEADER).pack(anchor="w")
+        self.e_buscar = tk.Entry(search_card, font=FONT_NORMAL, width=60,
+                                 bd=1, relief="solid")
+        self.e_buscar.pack(anchor="w", pady=(4, 8), ipady=5)
+        self.e_buscar.insert(0, "Buscar por nombre o ID")
+        make_btn(search_card, "Buscar", self._buscar, width=10).pack(anchor="w")
+
+        # Tabla
+        cols = ("ID", "Nombre", "Apellido", "Grado", "Acciones")
+        self.tree = ttk.Treeview(self, columns=cols, show="headings", height=10)
+        widths = {"ID": 70, "Nombre": 200, "Apellido": 200, "Grado": 100, "Acciones": 150}
+        for col in cols:
+            self.tree.heading(col, text=col)
+            self.tree.column(col, width=widths[col])
+        self.tree.pack(fill="both", expand=True, padx=20, pady=(0, 16))
+
+        self._cargar_todos()
+
+    def _cargar_todos(self, filtro=""):
+        for row in self.tree.get_children():
+            self.tree.delete(row)
+        conn = get_connection()
+        c = conn.cursor()
+        if filtro:
+            c.execute("""
+                SELECT id, nombre, apellido, grado FROM estudiantes
+                WHERE nombre LIKE ? OR apellido LIKE ? OR CAST(id AS TEXT) LIKE ?
+            """, (f"%{filtro}%", f"%{filtro}%", f"%{filtro}%"))
+        else:
+            c.execute("SELECT id, nombre, apellido, grado FROM estudiantes")
+        for row in c.fetchall():
+            self.tree.insert("", "end", iid=row[0],
+                             values=(*row, "Editar | Eliminar"))
+        conn.close()
+
+    def _buscar(self):
+        q = self.e_buscar.get().strip()
+        if q == "Buscar por nombre o ID":
+            q = ""
+        self._cargar_todos(q)
+
+    def _get_selected_id(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning("Seleccione", "Seleccione un estudiante de la lista.")
+            return None
+        return int(sel[0])
+
+    def _añadir(self):
+        FormEstudiante(self.winfo_toplevel(), None, self._cargar_todos)
+
+    def _editar(self):
+        est_id = self._get_selected_id()
+        if est_id:
+            FormEstudiante(self.winfo_toplevel(), est_id, self._cargar_todos)
+
+    def _eliminar(self):
+        est_id = self._get_selected_id()
+        if not est_id:
+            return
+        if messagebox.askyesno("Confirmar",
+                               "¿Eliminar este estudiante y sus registros?"):
+            conn = get_connection()
+            c = conn.cursor()
+            c.execute("DELETE FROM registros WHERE estudiante_id=?", (est_id,))
+            c.execute("DELETE FROM estudiantes WHERE id=?", (est_id,))
+            conn.commit()
+            conn.close()
+            self._cargar_todos()
+            messagebox.showinfo("Listo", "Estudiante eliminado.")
+
+
+class FormEstudiante(BaseWindow):
+    """Formulario para añadir o editar un estudiante."""
+    def __init__(self, master, est_id, callback):
+        super().__init__(master, "Formulario Estudiante", "380x300")
+        self.est_id   = est_id
+        self.callback = callback
+        self._build()
+
+    def _build(self):
+        titulo = "Editar Estudiante" if self.est_id else "Añadir Estudiante"
+        tk.Label(self, text=titulo, bg=BG_MAIN,
+                 font=FONT_TITLE).pack(pady=(20, 10))
+
+        card = tk.Frame(self, bg=BG_CARD, bd=1, relief="solid",
+                        padx=24, pady=18)
+        card.pack()
+
+        def campo(label, row):
+            tk.Label(card, text=label + ":", bg=BG_CARD,
+                     font=FONT_NORMAL).grid(row=row, column=0, sticky="w", pady=4)
+            e = tk.Entry(card, font=FONT_NORMAL, width=22,
+                         bd=1, relief="solid")
+            e.grid(row=row, column=1, padx=(8, 0), pady=4, ipady=4)
+            return e
+
+        self.e_nombre   = campo("Nombre",   0)
+        self.e_apellido = campo("Apellido", 1)
+        self.e_grado    = campo("Grado",    2)
+
+        if self.est_id:
+            conn = get_connection()
+            c = conn.cursor()
+            c.execute("SELECT nombre, apellido, grado FROM estudiantes WHERE id=?",
+                      (self.est_id,))
+            row = c.fetchone()
+            conn.close()
+            if row:
+                self.e_nombre.insert(0, row[0])
+                self.e_apellido.insert(0, row[1])
+                self.e_grado.insert(0, row[2])
+
+        make_btn(self, "Guardar", self._guardar, width=20).pack(pady=12)
+
+    def _guardar(self):
+        nombre   = self.e_nombre.get().strip()
+        apellido = self.e_apellido.get().strip()
+        grado    = self.e_grado.get().strip()
+
+        if not nombre or not apellido or not grado:
+            messagebox.showwarning("Campos vacíos", "Complete todos los campos.")
+            return
+
+        conn = get_connection()
+        c = conn.cursor()
+        if self.est_id:
+            c.execute("""
+                UPDATE estudiantes SET nombre=?, apellido=?, grado=?
+                WHERE id=?
+            """, (nombre, apellido, grado, self.est_id))
+        else:
+            c.execute("""
+                INSERT INTO estudiantes (nombre, apellido, grado)
+                VALUES (?,?,?)
+            """, (nombre, apellido, grado))
+        conn.commit()
+        conn.close()
+
+        self.callback()
+        self.destroy()
+        messagebox.showinfo("Guardado", "Estudiante guardado correctamente.")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  PANTALLA 7 – CONSULTA DE HISTORIAL
+# ═══════════════════════════════════════════════════════════════
+class ConsultaHistorial(tk.Frame):
+    def __init__(self, master):
+        super().__init__(master, bg=BG_MAIN)
+        self.pack(fill="both", expand=True)
+        self._build()
+
+    def _build(self):
+        make_header(self, "RAE")
+        make_navbar(self, [
+            ("Inicio",        lambda: None),
+            ("Monitoreo",     lambda: None),
+            ("Administración",lambda: None),
+        ])
+
+        top = tk.Frame(self, bg=BG_MAIN)
+        top.pack(fill="x", padx=20, pady=10)
+        tk.Label(top, text="Consulta de Historial",
+                 bg=BG_MAIN, font=FONT_TITLE).pack(side="left")
+        make_btn(top, "Volver al panel", self.winfo_toplevel().destroy,
+                 width=16).pack(side="right")
+
+        # Filtros
+        filt = tk.Frame(self, bg=BG_CARD, bd=1, relief="solid",
+                        padx=16, pady=14)
+        filt.pack(fill="x", padx=20, pady=(0, 10))
+
+        left = tk.Frame(filt, bg=BG_CARD)
+        left.pack(side="left", padx=(0, 20))
+        tk.Label(left, text="Buscar por Nombre:", bg=BG_CARD,
+                 font=FONT_NORMAL).pack(anchor="w")
+        self.e_nombre = tk.Entry(left, font=FONT_NORMAL, width=30,
+                                 bd=1, relief="solid")
+        self.e_nombre.pack(pady=4, ipady=5)
+
+        right = tk.Frame(filt, bg=BG_CARD)
+        right.pack(side="left")
+        tk.Label(right, text="Buscar por Fecha (AAAA-MM-DD):", bg=BG_CARD,
+                 font=FONT_NORMAL).pack(anchor="w")
+        self.e_fecha = tk.Entry(right, font=FONT_NORMAL, width=22,
+                                bd=1, relief="solid")
+        self.e_fecha.pack(pady=4, ipady=5)
+
+        make_btn(filt, "Buscar", self._buscar, width=10).pack(
+            side="left", padx=20, pady=20)
+
+        # Resultados
+        res = tk.Frame(self, bg=BG_CARD, bd=1, relief="solid",
+                       padx=16, pady=14)
+        res.pack(fill="both", expand=True, padx=20, pady=(0, 16))
+
+        tk.Label(res, text="Resultados de la Búsqueda",
+                 bg=BG_CARD, font=FONT_HEADER).pack(anchor="w", pady=(0, 8))
+
+        cols = ("Estudiante", "Fecha", "Hora Ingreso", "Hora Salida")
+        self.tree = ttk.Treeview(res, columns=cols, show="headings", height=10)
+        for col in cols:
+            self.tree.heading(col, text=col)
+            self.tree.column(col, width=220)
+        self.tree.pack(fill="both", expand=True)
+
+        self._buscar()
+
+    def _buscar(self):
+        for row in self.tree.get_children():
+            self.tree.delete(row)
+
+        nombre = self.e_nombre.get().strip()
+        fecha  = self.e_fecha.get().strip()
+
+        conn = get_connection()
+        c = conn.cursor()
+        query = """
+            SELECT e.nombre || ' ' || e.apellido AS est,
+                   r.fecha,
+                   MAX(CASE WHEN r.tipo='Ingreso' THEN r.hora END) AS entrada,
+                   MAX(CASE WHEN r.tipo='Salida'  THEN r.hora END) AS salida
+            FROM registros r
+            JOIN estudiantes e ON r.estudiante_id = e.id
+            WHERE 1=1
+        """
+        params = []
+        if nombre:
+            query += " AND (e.nombre LIKE ? OR e.apellido LIKE ?)"
+            params += [f"%{nombre}%", f"%{nombre}%"]
+        if fecha:
+            query += " AND r.fecha = ?"
+            params.append(fecha)
+        query += " GROUP BY e.id, r.fecha ORDER BY r.fecha DESC"
+
+        c.execute(query, params)
+        for row in c.fetchall():
+            self.tree.insert("", "end",
+                             values=(row[0], row[1],
+                                     row[2] or "—", row[3] or "—"))
+        conn.close()
+
+
+# ═══════════════════════════════════════════════════════════════
+#  PANTALLA 8 – GENERACIÓN DE REPORTES
+# ═══════════════════════════════════════════════════════════════
+class GeneracionReportes(tk.Frame):
+    def __init__(self, master):
+        super().__init__(master, bg=BG_MAIN)
+        self.pack(fill="both", expand=True)
+        self._build()
+
+    def _build(self):
+        make_header(self, "RAE")
+        make_navbar(self, [
+            ("Inicio",        lambda: None),
+            ("Monitoreo",     lambda: None),
+            ("Administración",lambda: None),
+        ])
+
+        tk.Label(self, text="Generación de Reportes",
+                 bg=BG_MAIN, font=FONT_TITLE).pack(anchor="w", padx=20, pady=12)
+
+        # Filtros
+        filt = tk.Frame(self, bg=BG_CARD, bd=1, relief="solid",
+                        padx=16, pady=16)
+        filt.pack(fill="x", padx=20, pady=(0, 10))
+
+        tk.Label(filt, text="Filtros de Reporte", bg=BG_CARD,
+                 font=FONT_HEADER).grid(row=0, column=0, columnspan=4,
+                                        sticky="w", pady=(0, 10))
+
+        # Nombre
+        tk.Label(filt, text="Nombre del Estudiante:", bg=BG_CARD,
+                 font=FONT_NORMAL).grid(row=1, column=0, sticky="w")
+        self.e_nombre = tk.Entry(filt, font=FONT_NORMAL, width=28,
+                                 bd=1, relief="solid")
+        self.e_nombre.insert(0, "Ej. Juan Pérez")
+        self.e_nombre.grid(row=1, column=1, padx=(6, 20), ipady=5)
+
+        # Rango fechas
+        tk.Label(filt, text="Rango de Fechas:", bg=BG_CARD,
+                 font=FONT_NORMAL).grid(row=1, column=2, sticky="w")
+        self.e_rango = tk.Entry(filt, font=FONT_NORMAL, width=28,
+                                bd=1, relief="solid")
+        self.e_rango.insert(0, "AAAA-MM-DD : AAAA-MM-DD")
+        self.e_rango.grid(row=1, column=3, padx=(6, 0), ipady=5)
+
+        # Tipo de reporte
+        tk.Label(filt, text="Tipo de Reporte:", bg=BG_CARD,
+                 font=FONT_NORMAL).grid(row=2, column=0, sticky="w", pady=(10, 0))
+        self.combo_tipo = ttk.Combobox(
+            filt, width=26,
+            values=["Asistencia Diaria", "Resumen Mensual", "Ausencias"]
+        )
+        self.combo_tipo.current(0)
+        self.combo_tipo.grid(row=2, column=1, padx=(6, 0), pady=(10, 0), sticky="w")
+
+        make_btn(filt, "Generar Reporte", self._generar,
+                 width=18).grid(row=3, column=0, columnspan=2,
+                                 sticky="w", pady=14)
+
+        # Tabla de resultado
+        res = tk.Frame(self, bg=BG_CARD, bd=1, relief="solid",
+                       padx=16, pady=14)
+        res.pack(fill="both", expand=True, padx=20, pady=(0, 10))
+
+        tk.Label(res, text="Reporte Generado", bg=BG_CARD,
+                 font=FONT_HEADER).pack(anchor="w", pady=(0, 8))
+
+        cols = ("Fecha", "Estudiante", "Hora de Entrada",
+                "Hora de Salida", "Estado")
+        self.tree = ttk.Treeview(res, columns=cols, show="headings", height=8)
+        for col in cols:
+            self.tree.heading(col, text=col)
+            self.tree.column(col, width=160)
+        self.tree.pack(fill="both", expand=True)
+
+        make_btn(self, "Volver al panel", self.winfo_toplevel().destroy,
+                 width=18).pack(anchor="w", padx=20, pady=8)
+
+    def _generar(self):
+        for row in self.tree.get_children():
+            self.tree.delete(row)
+
+        nombre = self.e_nombre.get().strip()
+        if nombre == "Ej. Juan Pérez":
+            nombre = ""
+
+        rango = self.e_rango.get().strip()
+        fecha_ini = fecha_fin = ""
+        if ":" in rango:
+            partes = [p.strip() for p in rango.split(":")]
+            if len(partes) == 2:
+                fecha_ini, fecha_fin = partes
+
+        conn = get_connection()
+        c = conn.cursor()
+
+        tipo_rpt = self.combo_tipo.get()
+
+        query = """
+            SELECT r.fecha,
+                   e.nombre || ' ' || e.apellido,
+                   MAX(CASE WHEN r.tipo='Ingreso' THEN r.hora END),
+                   MAX(CASE WHEN r.tipo='Salida'  THEN r.hora END)
+            FROM registros r
+            JOIN estudiantes e ON r.estudiante_id = e.id
+            WHERE 1=1
+        """
+        params = []
+        if nombre:
+            query += " AND (e.nombre LIKE ? OR e.apellido LIKE ?)"
+            params += [f"%{nombre}%", f"%{nombre}%"]
+        if fecha_ini and fecha_fin:
+            query += " AND r.fecha BETWEEN ? AND ?"
+            params += [fecha_ini, fecha_fin]
+
+        query += " GROUP BY r.fecha, e.id ORDER BY r.fecha DESC"
+        c.execute(query, params)
+        rows = c.fetchall()
+        conn.close()
+
+        for fecha, est, entrada, salida in rows:
+            estado = "Presente" if entrada else "Ausente"
+            self.tree.insert("", "end",
+                             values=(fecha, est,
+                                     entrada or "—", salida or "—", estado))
+
+        if not rows:
+            messagebox.showinfo("Sin resultados",
+                                "No se encontraron registros con esos filtros.")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  VENTANA PRINCIPAL
+# ═══════════════════════════════════════════════════════════════
+def main():
+    init_db()  # Inicializa la base de datos
+
+    root = tk.Tk()
+    root.title("RAE – Registro de Asistencia Estudiantil")
+    root.geometry("900x620")
+    root.configure(bg=BG_MAIN)
+    root.resizable(True, True)
+
+    # Estilo ttk
+    style = ttk.Style()
+    style.theme_use("clam")
+    style.configure("Treeview",
+                    background=BG_WHITE,
+                    foreground="#333",
+                    rowheight=28,
+                    fieldbackground=BG_WHITE,
+                    font=FONT_NORMAL)
+    style.configure("Treeview.Heading",
+                    background=BG_HEADER,
+                    foreground="#333",
+                    font=FONT_HEADER)
+    style.map("Treeview", background=[("selected", COLOR_LIGHT)])
+
+    PantallaInicio(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
